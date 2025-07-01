@@ -1,0 +1,6 @@
+selenium==4.15.2
+pandas
+tqdm
+beautifulsoup4
+lxml
+webdriver-manager 
