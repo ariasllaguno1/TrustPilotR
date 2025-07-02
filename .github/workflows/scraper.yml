@@ -1,0 +1,174 @@
+name: Ejecutar TrustPilotScraper
+
+on:
+  workflow_dispatch:  # Permite ejecutarlo manualmente desde GitHub
+    inputs:
+      max_companies:
+        description: 'Número máximo de empresas a procesar'
+        required: false
+        default: '100'
+      max_review_pages:
+        description: 'Páginas de reseñas por empresa'
+        required: false
+        default: '10'
+      max_company_pages:
+        description: 'Páginas de categoría a recorrer'
+        required: false
+        default: '10'
+
+jobs:
+  run-scraper:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360  # 6 horas máximo
+
+    steps:
+      - name: Checkout del repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+          cache: 'pip'
+
+      - name: Instalar dependencias Python
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install papermill ipykernel nbconvert
+
+      - name: Instalar Google Chrome
+        run: |
+          wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
+          sudo sh -c 'echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google-chrome.list'
+          sudo apt-get update
+          sudo apt-get install -y google-chrome-stable
+
+      - name: Verificar instalación de Chrome
+        run: |
+          google-chrome --version
+          which google-chrome
+
+      - name: Crear directorio de checkpoints
+        run: |
+          mkdir -p checkpoints
+          chmod 755 checkpoints
+
+      - name: Configurar variables de entorno
+        run: |
+          echo "DISPLAY=:99" >> $GITHUB_ENV
+          echo "CHROME_BIN=/usr/bin/google-chrome" >> $GITHUB_ENV
+
+      - name: Iniciar Xvfb (para modo headless)
+        run: |
+          sudo apt-get install -y xvfb
+          Xvfb :99 -screen 0 1920x1080x24 > /dev/null 2>&1 &
+
+      - name: Ejecutar scraper optimizado
+        run: |
+          python scraper_github_actions.py \
+            --max_companies ${{ github.event.inputs.max_companies || 100 }} \
+            --max_review_pages ${{ github.event.inputs.max_review_pages || 10 }} \
+            --max_company_pages ${{ github.event.inputs.max_company_pages || 10 }}
+
+      - name: Ejecutar scraper con papermill (fallback)
+        if: failure()
+        run: |
+          # Crear celda para ejecutar en el notebook
+          echo "# Ejecutar scraper con parámetros" > scraper_params.py
+          echo "checkpoint = scrape_trustpilot_travel_with_checkpoint(" >> scraper_params.py
+          echo "    max_companies=${{ github.event.inputs.max_companies || 100 }}," >> scraper_params.py
+          echo "    max_review_pages_per_company=${{ github.event.inputs.max_review_pages || 10 }}," >> scraper_params.py
+          echo "    max_company_pages=${{ github.event.inputs.max_company_pages || 10 }}," >> scraper_params.py
+          echo "    session_id=None," >> scraper_params.py
+          echo "    resume=True" >> scraper_params.py
+          echo ")" >> scraper_params.py
+          echo "df_final = consolidate_session_reviews()" >> scraper_params.py
+          
+          # Ejecutar notebook con papermill
+          papermill TrustPilotScraper.ipynb TrustPilotScraper_executed.ipynb \
+            -f scraper_params.py \
+            --log-output || echo "Papermill falló, continuando..."
+
+      - name: Listar archivos generados
+        run: |
+          echo "📁 Archivos generados:"
+          find . -name "*.csv" -type f -exec ls -lh {} \; 2>/dev/null || echo "No se encontraron archivos CSV"
+          find . -name "*.ipynb" -type f -exec ls -lh {} \; 2>/dev/null || echo "No se encontraron notebooks"
+          find checkpoints -type f -exec ls -lh {} \; 2>/dev/null || echo "No se encontraron checkpoints"
+
+      - name: Subir archivos CSV como artefactos
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: csv-files
+          path: |
+            *.csv
+            trustpilot_*.csv
+            results/*.csv
+          retention-days: 30
+
+      - name: Subir checkpoints como artefactos
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: checkpoints
+          path: |
+            checkpoints/
+          retention-days: 30
+
+      - name: Subir notebook ejecutado como artefacto
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: executed-notebook
+          path: |
+            TrustPilotScraper_executed.ipynb
+            TrustPilotScraper.ipynb
+          retention-days: 30
+
+      - name: Subir logs de errores
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: error-logs
+          path: |
+            checkpoints/*/errors.csv
+            *.log
+            *.png
+            *.html
+          retention-days: 30
+
+      - name: Generar resumen de ejecución
+        if: always()
+        run: |
+          echo "## 📊 Resumen de Ejecución" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          # Contar archivos CSV
+          csv_count=$(find . -name "*.csv" -type f | wc -l)
+          echo "- **Archivos CSV generados:** $csv_count" >> $GITHUB_STEP_SUMMARY
+          
+          # Mostrar checkpoints
+          if [ -d "checkpoints" ]; then
+            checkpoint_dirs=$(find checkpoints -type d -mindepth 1 | wc -l)
+            echo "- **Sesiones de checkpoint:** $checkpoint_dirs" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          # Mostrar tamaño total de archivos
+          total_size=$(find . -name "*.csv" -type f -exec du -ch {} + 2>/dev/null | tail -1 | cut -f1 || echo "0")
+          echo "- **Tamaño total de CSVs:** $total_size" >> $GITHUB_STEP_SUMMARY
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📁 Artefactos disponibles:" >> $GITHUB_STEP_SUMMARY
+          echo "- \`csv-files\`: Todos los archivos CSV generados" >> $GITHUB_STEP_SUMMARY
+          echo "- \`checkpoints\`: Archivos de checkpoint para reanudar" >> $GITHUB_STEP_SUMMARY
+          echo "- \`executed-notebook\`: Notebook ejecutado con resultados" >> $GITHUB_STEP_SUMMARY
+          echo "- \`error-logs\`: Logs y archivos de debug" >> $GITHUB_STEP_SUMMARY
+
+      - name: Información de parámetros utilizados
+        run: |
+          echo "### ⚙️ Parámetros de ejecución:" >> $GITHUB_STEP_SUMMARY
+          echo "- **Empresas máximas:** ${{ github.event.inputs.max_companies || '100' }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Páginas de reseñas por empresa:** ${{ github.event.inputs.max_review_pages || '10' }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Páginas de categoría:** ${{ github.event.inputs.max_company_pages || '10' }}" >> $GITHUB_STEP_SUMMARY 
