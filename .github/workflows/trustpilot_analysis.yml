@@ -57,7 +57,7 @@ jobs:
 
       - name: Ejecutar análisis
         env:
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY || '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' }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
         run: |
           # Verificar que la API key esté configurada
           if [ -z "$OPENROUTER_API_KEY" ]; then
