@@ -57,12 +57,16 @@ jobs:
 
       - name: Ejecutar análisis
         env:
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY || '' }}
         run: |
           # Verificar que la API key esté configurada
           if [ -z "$OPENROUTER_API_KEY" ]; then
             echo "❌ Error: OPENROUTER_API_KEY no está configurada en los secrets del repositorio"
-            echo "Por favor configura tu API key de OpenRouter en Settings > Secrets and variables > Actions"
+            echo "📝 Pasos para configurarla:"
+            echo "1. Ve a Settings > Secrets and variables > Actions"
+            echo "2. Haz clic en 'New repository secret'"
+            echo "3. Nombre: OPENROUTER_API_KEY"
+            echo "4. Valor: Tu API key de OpenRouter"
             exit 1
           fi
           
