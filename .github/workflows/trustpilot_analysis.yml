@@ -1,0 +1,186 @@
+name: Análisis TrustPilot con Script Python
+
+on:
+  workflow_dispatch:  # Permite ejecutarlo manualmente
+    inputs:
+      csv_file:
+        description: 'Nombre del archivo CSV a analizar (ej: test.csv)'
+        required: true
+        default: 'test.csv'
+      batch_size:
+        description: 'Número de reseñas por lote'
+        required: false
+        default: '10'
+      max_reviews:
+        description: 'Máximo número de reseñas a analizar (vacío = todas)'
+        required: false
+        default: ''
+      openrouter_model:
+        description: 'Modelo de OpenRouter a usar'
+        required: false
+        default: 'google/gemini-2.5-flash'
+
+jobs:
+  analyze-reviews:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120  # 2 horas máximo
+    
+    steps:
+      - name: Checkout del repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+          cache: 'pip'
+
+      - name: Instalar dependencias Python
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Verificar archivo CSV
+        run: |
+          if [ ! -f "${{ github.event.inputs.csv_file }}" ]; then
+            echo "❌ Error: No se encontró el archivo ${{ github.event.inputs.csv_file }}"
+            echo "Archivos CSV disponibles:"
+            find . -name "*.csv" -type f
+            exit 1
+          fi
+          echo "✅ Archivo encontrado: ${{ github.event.inputs.csv_file }}"
+          echo "Tamaño del archivo: $(du -h ${{ github.event.inputs.csv_file }})"
+          echo "Número de líneas: $(wc -l < ${{ github.event.inputs.csv_file }})"
+
+      - name: Hacer el script ejecutable
+        run: chmod +x trustpilot_analysis.py
+
+      - name: Ejecutar análisis
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: |
+          # Verificar que la API key esté configurada
+          if [ -z "$OPENROUTER_API_KEY" ]; then
+            echo "❌ Error: OPENROUTER_API_KEY no está configurada en los secrets del repositorio"
+            echo "Por favor configura tu API key de OpenRouter en Settings > Secrets and variables > Actions"
+            exit 1
+          fi
+          
+          # Construir argumentos del comando
+          ARGS="${{ github.event.inputs.csv_file }}"
+          ARGS="$ARGS --model ${{ github.event.inputs.openrouter_model }}"
+          ARGS="$ARGS --batch-size ${{ github.event.inputs.batch_size }}"
+          
+          # Agregar max-reviews si se especifica
+          if [ -n "${{ github.event.inputs.max_reviews }}" ]; then
+            ARGS="$ARGS --max-reviews ${{ github.event.inputs.max_reviews }}"
+          fi
+          
+          echo "🚀 Ejecutando: python trustpilot_analysis.py $ARGS"
+          
+          # Ejecutar el script
+          python trustpilot_analysis.py $ARGS || {
+            echo "❌ Error ejecutando el script de análisis"
+            exit 1
+          }
+
+      - name: Verificar archivos generados
+        if: always()
+        run: |
+          echo "📁 Archivos generados:"
+          find . -name "*analyzed*.csv" -type f -exec ls -lh {} \; 2>/dev/null || echo "No se encontraron archivos de análisis"
+          find . -name "trustpilot_analyzed_*.csv" -type f -exec ls -lh {} \; 2>/dev/null || echo "No se encontraron archivos con timestamp"
+
+      - name: Generar reporte de análisis
+        if: always()
+        run: |
+          echo "## 📊 Resumen del Análisis de Reseñas" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          # Información de parámetros
+          echo "### ⚙️ Parámetros utilizados:" >> $GITHUB_STEP_SUMMARY
+          echo "- **Archivo CSV:** ${{ github.event.inputs.csv_file }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Tamaño de lote:** ${{ github.event.inputs.batch_size }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Máximo de reseñas:** ${{ github.event.inputs.max_reviews || 'Todas' }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Modelo:** ${{ github.event.inputs.openrouter_model }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          # Buscar el archivo más reciente de análisis
+          latest_csv=$(find . -name "*analyzed*.csv" -type f -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -1 | cut -d' ' -f2-)
+          
+          if [ -n "$latest_csv" ] && [ -f "$latest_csv" ]; then
+            echo "### 📁 Archivo de resultados:" >> $GITHUB_STEP_SUMMARY
+            echo "- **Nombre:** $(basename $latest_csv)" >> $GITHUB_STEP_SUMMARY
+            echo "- **Tamaño:** $(du -h $latest_csv | cut -f1)" >> $GITHUB_STEP_SUMMARY
+            
+            # Contar líneas (reseñas procesadas)
+            total_lines=$(wc -l < "$latest_csv" 2>/dev/null || echo "0")
+            if [ "$total_lines" -gt 1 ]; then
+              processed_reviews=$((total_lines - 1))  # Restar header
+              echo "- **Reseñas procesadas:** $processed_reviews" >> $GITHUB_STEP_SUMMARY
+            fi
+            
+            # Intentar extraer estadísticas básicas del CSV
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### 📈 Estadísticas rápidas:" >> $GITHUB_STEP_SUMMARY
+            
+            # Contar sentimientos si existe la columna
+            if head -1 "$latest_csv" | grep -q "sentiment"; then
+              sentiment_col=$(head -1 "$latest_csv" | tr ',' '\n' | grep -n "sentiment" | cut -d: -f1)
+              if [ -n "$sentiment_col" ]; then
+                echo "#### Sentimientos:" >> $GITHUB_STEP_SUMMARY
+                tail -n +2 "$latest_csv" | cut -d',' -f"$sentiment_col" | sort | uniq -c | sort -nr | head -5 | while read count sentiment; do
+                  echo "- **$sentiment:** $count reseñas" >> $GITHUB_STEP_SUMMARY
+                done
+              fi
+            fi
+            
+          else
+            echo "### ❌ Estado del análisis:" >> $GITHUB_STEP_SUMMARY
+            echo "No se completó el análisis correctamente o no se generaron archivos de salida." >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 🔗 Acceso a resultados:" >> $GITHUB_STEP_SUMMARY
+          echo "Los resultados están disponibles en la sección **Artifacts** de esta ejecución." >> $GITHUB_STEP_SUMMARY
+
+      - name: Subir archivos de análisis como artefactos
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: trustpilot-analysis-results
+          path: |
+            *analyzed*.csv
+            trustpilot_analyzed_*.csv
+          retention-days: 30
+
+      - name: Mostrar estadísticas finales
+        if: always()
+        run: |
+          echo ""
+          echo "🎯 RESUMEN FINAL:"
+          echo "================="
+          
+          # Buscar archivos de resultado
+          result_files=$(find . -name "*analyzed*.csv" -type f | wc -l)
+          echo "📄 Archivos de resultado generados: $result_files"
+          
+          if [ "$result_files" -gt 0 ]; then
+            latest_file=$(find . -name "*analyzed*.csv" -type f -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -1 | cut -d' ' -f2-)
+            echo "📁 Archivo principal: $(basename $latest_file)"
+            echo "💾 Tamaño: $(du -h $latest_file | cut -f1)"
+            
+            total_lines=$(wc -l < "$latest_file" 2>/dev/null || echo "0")
+            if [ "$total_lines" -gt 1 ]; then
+              processed_reviews=$((total_lines - 1))
+              echo "✅ Reseñas procesadas: $processed_reviews"
+            fi
+          else
+            echo "❌ No se generaron archivos de resultado"
+          fi
+          
+          echo ""
+          echo "🔍 Para descargar los resultados:"
+          echo "1. Ve a la pestaña 'Actions' en GitHub"
+          echo "2. Selecciona esta ejecución del workflow"
+          echo "3. Descarga los artefactos en la sección 'Artifacts'" 
