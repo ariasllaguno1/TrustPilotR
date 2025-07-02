@@ -56,7 +56,6 @@ def setup_driver_github_actions(headless=True):
     chrome_options.add_argument('--disable-extensions')
     chrome_options.add_argument('--disable-plugins')
     chrome_options.add_argument('--disable-images')
-    chrome_options.add_argument('--disable-javascript')  # Solo para cargar más rápido
     chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
     chrome_options.add_experimental_option('useAutomationExtension', False)
     
