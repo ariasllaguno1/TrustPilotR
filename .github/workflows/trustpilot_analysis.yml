@@ -23,7 +23,7 @@ on:
 jobs:
   analyze-reviews:
     runs-on: ubuntu-latest
-    timeout-minutes: 120  # 2 horas máximo
+    timeout-minutes: 359  # 2 horas máximo
     
     steps:
       - name: Checkout del repositorio
